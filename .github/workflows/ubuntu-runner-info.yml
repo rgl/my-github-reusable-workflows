@@ -1,0 +1,126 @@
+name: Ubuntu Runner Info
+description: Display information about the Ubuntu GitHub Actions runner environment.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: The runner to use (e.g., ubuntu-latest).
+        type: string
+        default: ubuntu-latest
+      list-working-directory-files:
+        description: Whether to list the working directory files.
+        type: boolean
+        default: true
+        required: false
+    outputs:
+      job_workflow_ref:
+        description: The workflow reference of the job.
+        value: ${{ jobs.ubuntu-runner-info.outputs.job_workflow_ref }}
+      job_workflow_sha:
+        description: The workflow SHA of the job.
+        value: ${{ jobs.ubuntu-runner-info.outputs.job_workflow_sha }}
+jobs:
+  ubuntu-runner-info:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      job_workflow_ref: ${{ steps.dump_example_id_token.outputs.job_workflow_ref }}
+      job_workflow_sha: ${{ steps.dump_example_id_token.outputs.job_workflow_sha }}
+    permissions:
+      id-token: write
+    steps:
+      - name: Runner WebHook Event Payload
+        run: |
+          exec 2>&1
+          set -euxo pipefail
+          jq . "$GITHUB_EVENT_PATH"
+      - name: Information
+        run: |
+          exec 2>&1
+          set -euxo pipefail
+          echo "$SHELL"
+          cat "/proc/$$/cmdline" | tr \\0 \\n
+          uname -a
+          id
+          env | sort
+          systemctl status
+          networkctl status
+          networkctl status --all --full
+          df -h
+          mount | sort
+      - name: Runner Home Files
+        run: |
+          exec 2>&1
+          set -euxo pipefail
+          echo "$HOME"
+          find ~ -type f
+      # see https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows
+      - name: Get Example ID Token
+        uses: actions/github-script@v7
+        id: example_id_token
+        with:
+          script: |
+            const token = await core.getIDToken('https://example.com');
+            core.setOutput('id_token', token);
+      # dump the example id token to the job output.
+      # NB never do this is a real job because the jwt should remain secret.
+      - name: Dump Example ID Token
+        id: dump_example_id_token
+        env:
+          EXAMPLE_ID_TOKEN: ${{ steps.example_id_token.outputs.id_token }}
+        run: |
+          exec 2>&1
+          set -euxo pipefail
+          echo "$EXAMPLE_ID_TOKEN" | base64
+          python3 <<'EOF'
+          import os, base64, json
+          token = os.getenv('EXAMPLE_ID_TOKEN')
+          claims = json.loads(
+            base64.urlsafe_b64decode(
+              token.split('.')[1] + '===').decode('utf-8'))
+          print('claims:', json.dumps(claims, indent=2))
+          workflow_ref = claims['workflow_ref']
+          workflow_sha = claims['workflow_sha']
+          job_workflow_ref = claims['job_workflow_ref']
+          job_workflow_sha = claims['job_workflow_sha']
+          # e.g. rgl/my-github-reusable-workflows-playground/.github/workflows/test.yml@refs/heads/main
+          job_workflow_repository = '/'.join(claims['job_workflow_ref'].split('/')[0:2])
+          print(f'workflow:     {workflow_sha} {workflow_ref}')
+          print(f'job_workflow: {job_workflow_sha} {job_workflow_ref}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f'job_workflow_ref={job_workflow_ref}\n')
+            f.write(f'job_workflow_sha={job_workflow_sha}\n')
+            f.write(f'job_workflow_repository={job_workflow_repository}\n')
+          EOF
+      - name: Checkout Caller Repository
+        uses: actions/checkout@v4
+        with:
+          path: caller-repository
+      # NB github actions does not provide a direct way to known this reusable
+      #    workflow url and revision. so, we workaround this by creating an
+      #    id-token and then extract the job_workflow_ref and job_workflow_sha
+      #    claims.
+      - name: Checkout Called Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.dump_example_id_token.outputs.job_workflow_repository }}
+          ref: ${{ steps.dump_example_id_token.outputs.job_workflow_sha }}
+          path: called-repository
+      - name: Show Checkout Caller Repository Revision
+        run: |
+          exec 2>&1
+          set -euxo pipefail
+          pushd caller-repository
+          git remote -v
+          git rev-parse HEAD
+          popd
+          pushd called-repository
+          git remote -v
+          git rev-parse HEAD
+          popd
+      - name: Working Directory Files
+        if: inputs.list-working-directory-files
+        run: |
+          exec 2>&1
+          set -euxo pipefail
+          pwd
+          find . -type f
